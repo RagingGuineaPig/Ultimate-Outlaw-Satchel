@@ -21,7 +21,7 @@ HMODULE g_module = nullptr;
 
 // ============================================================
 // Ultimate Outlaw Satchel
-// Version 2.15.1
+// Version 2.15.24
 //
 // EARLY-BOOTSTRAP 500K SATCHEL PATCH + AMMO -1 + "HOARDING X" + FIRST-RUN WELCOME + RETURNING HARIS STARTUP
 //
