@@ -21,9 +21,9 @@ HMODULE g_module = nullptr;
 
 // ============================================================
 // Ultimate Outlaw Satchel
-// Version 2.15.24
+// Version 2.16
 //
-// EARLY-BOOTSTRAP 500K SATCHEL PATCH + AMMO -1 + "HOARDING X" + FIRST-RUN WELCOME + RETURNING HARIS STARTUP
+// EARLY-BOOTSTRAP -1 UNLIMITED SATCHEL + RAM-HORN HERB UI EXCEPTION + FIRST-RUN WELCOME + RETURNING HARIS STARTUP
 //
 // v1.76 mapped every stackable AMMO-group base-capacity record in the verified
 // 3,801,088-byte ItemDatabase region: 43/43 mapped, 0 unresolved,
@@ -51,11 +51,13 @@ HMODULE g_module = nullptr;
 // No custom weapon-wheel text is drawn; the lower display is simply Rockstar's
 // current ammo quantity with the slash/maximum naturally suppressed by -1.
 //
-// Existing proven behavior retained:
-//   - 517 positive records in the real 518-record SATCHEL pointer group -> 500000
-//   - the one negative SATCHEL record remains untouched
-//   - exactly 144 cigarette-card records -> 500000
-//   - all 4 stackable loot-watch records -> 500000
+// v2.16 capacity policy:
+//   - ordinary positive SATCHEL base records -> Rockstar -1 unlimited sentinel
+//   - Wild Mint / Creeping Thyme / Oregano -> 500000 during gameplay
+//   - those three temporarily -> -1 only while the Satchel UI is open
+//   - the one existing negative SATCHEL special record remains untouched
+//   - exactly 144 cigarette-card records -> -1
+//   - all 4 stackable loot-watch records -> -1
 //   - personal/unique quantity-1 watches remain untouched
 //
 // No F7. No ledger. No inventory hooks. No replacement catalog.
@@ -64,6 +66,8 @@ HMODULE g_module = nullptr;
 // ============================================================
 
 static constexpr std::uint32_t V181_WILD_MINT = 0xE61255CEu;
+static constexpr std::uint32_t V216_CREEPING_THYME = 0x7B14D38Du;
+static constexpr std::uint32_t V216_OREGANO = 0x209A4790u;
 static constexpr std::uint32_t V181_SLOT_ZERO = 0xD7E2D44Au;
 static constexpr std::uint32_t V181_SLOT_SATCHEL = 0x409F50CBu;
 static constexpr std::uint32_t V181_SLOT_CAPACITY_A = 0xD5C803CEu;
@@ -86,7 +90,7 @@ static constexpr std::int64_t V181_QTY_CAPACITY_A = 5;
 static constexpr std::int64_t V181_QTY_CAPACITY_B = 84;
 static constexpr std::int64_t V181_TARGET_MAX = 500000;
 // v2.03 ammo rule: all 43 mapped AMMO base capacities -> -1.
-// Satchel/card/watch targets remain 500000.
+// v2.16 Satchel/card/watch targets use -1 except the protected Ram Horn trio.
 static constexpr std::int64_t V181_AMMO_TEST_MAX = -1;
 
 static constexpr SIZE_T V181_RECORD_SIZE = 24u;
@@ -118,6 +122,14 @@ struct V181NamedItemHash
     std::uint32_t hash;
     const char* name;
 };
+
+// v2.16: -1 falsely activates the Ram Horn conditional reward for these three.
+// Keep them at 500000 during gameplay; use -1 only while the Satchel UI is open.
+static constexpr std::array<V181NamedItemHash, 3> V216_RAM_HORN_HERBS = {{
+    {V181_WILD_MINT,      "CONSUMABLE_HERB_WILD_MINT"},
+    {V216_CREEPING_THYME, "CONSUMABLE_HERB_CREEPING_THYME"},
+    {V216_OREGANO,        "CONSUMABLE_HERB_OREGANO"}
+}};
 
 // These are the four non-cigarette-card DOCUMENT records that share the exact
 // quantity-5 / 0xD7E2D44A multiplicity signature in RDO 1.33. Two are already
@@ -461,6 +473,9 @@ static int g_v181PrunedGeneration = 0;
 static bool g_v181SpecialPruneSucceeded = false;
 static int g_v181LastCardSampleMax = -999999;
 static int g_v181LastWatchSampleMax = -999999;
+
+static std::array<std::atomic<std::uintptr_t>, 3> g_v216RamHornBaseAddresses{};
+static bool g_v216RamHornUiSentinelActive = false;
 
 // v1.81 satchel presentation state.
 static constexpr const char* V181_SATCHEL_PATH = "Satchel";
@@ -1063,6 +1078,16 @@ static int V212FindWatchIndex(std::uint32_t hash)
     return -1;
 }
 
+static int V216FindRamHornHerbIndex(std::uint32_t hash)
+{
+    for (SIZE_T i = 0; i < V216_RAM_HORN_HERBS.size(); ++i)
+    {
+        if (V216_RAM_HORN_HERBS[i].hash == hash)
+            return static_cast<int>(i);
+    }
+    return -1;
+}
+
 static int V212FindAmmoIndex(std::uint32_t hash)
 {
     for (SIZE_T i = 0; i < V181_AMMO_MAP_ITEMS.size(); ++i)
@@ -1509,6 +1534,7 @@ static bool V212ValidateDescriptor(
 enum class V212TargetKind : std::uint8_t
 {
     Satchel,
+    RamHornHerb,
     Card,
     Watch,
     Ammo
@@ -1549,6 +1575,7 @@ static bool V212PatchValidatedDescriptor(
     std::array<bool, V212_CIGARETTE_CARD_HASHES.size()> cardFound{};
     std::array<bool, V181_WATCH_VERIFY_ITEMS.size()> watchFound{};
     std::array<bool, V181_AMMO_MAP_ITEMS.size()> ammoFound{};
+    std::array<bool, V216_RAM_HORN_HERBS.size()> ramHornHerbFound{};
 
     std::vector<V212Target> targets;
     targets.reserve(800u);
@@ -1598,6 +1625,7 @@ static bool V212PatchValidatedDescriptor(
         const int cardIndex = V212FindCardIndex(itemHash);
         const int watchIndex = V212FindWatchIndex(itemHash);
         const int ammoIndex = V212FindAmmoIndex(itemHash);
+        const int ramHornHerbIndex = V216FindRamHornHerbIndex(itemHash);
 
         int cardSlotMatches = 0;
         int watchSlotMatches = 0;
@@ -1636,31 +1664,44 @@ static bool V212PatchValidatedDescriptor(
                 ++satchelTotal;
 
                 if (quantity > 0)
-                {
                     ++satchelPositive;
-                    const std::int64_t desired =
-                        (quantity >= V181_TARGET_MAX)
-                            ? quantity
-                            : V181_TARGET_MAX;
+                else if (quantity < 0)
+                    ++satchelNegative;
+                else
+                    ++satchelZero;
 
+                if (ramHornHerbIndex >= 0)
+                {
                     if (!V212AddTarget(
                             targets,
                             quantityAddress,
                             quantity,
-                            desired,
+                            V181_TARGET_MAX,
+                            V212TargetKind::RamHornHerb,
+                            itemHash))
+                    {
+                        return false;
+                    }
+
+                    const SIZE_T ramIndex =
+                        static_cast<SIZE_T>(ramHornHerbIndex);
+                    ramHornHerbFound[ramIndex] = true;
+                    g_v216RamHornBaseAddresses[ramIndex].store(
+                        quantityAddress,
+                        std::memory_order_relaxed);
+                }
+                else if (quantity > 0)
+                {
+                    if (!V212AddTarget(
+                            targets,
+                            quantityAddress,
+                            quantity,
+                            -1LL,
                             V212TargetKind::Satchel,
                             itemHash))
                     {
                         return false;
                     }
-                }
-                else if (quantity < 0)
-                {
-                    ++satchelNegative;
-                }
-                else
-                {
-                    ++satchelZero;
                 }
             }
 
@@ -1670,23 +1711,15 @@ static bool V212PatchValidatedDescriptor(
                 ++cardSlotMatches;
                 cardFound[static_cast<SIZE_T>(cardIndex)] = true;
 
-                if (quantity > 0)
+                if (!V212AddTarget(
+                        targets,
+                        quantityAddress,
+                        quantity,
+                        -1LL,
+                        V212TargetKind::Card,
+                        itemHash))
                 {
-                    const std::int64_t desired =
-                        (quantity >= V181_TARGET_MAX)
-                            ? quantity
-                            : V181_TARGET_MAX;
-
-                    if (!V212AddTarget(
-                            targets,
-                            quantityAddress,
-                            quantity,
-                            desired,
-                            V212TargetKind::Card,
-                            itemHash))
-                    {
-                        return false;
-                    }
+                    return false;
                 }
             }
 
@@ -1696,23 +1729,15 @@ static bool V212PatchValidatedDescriptor(
                 ++watchSlotMatches;
                 watchFound[static_cast<SIZE_T>(watchIndex)] = true;
 
-                if (quantity > 0)
+                if (!V212AddTarget(
+                        targets,
+                        quantityAddress,
+                        quantity,
+                        -1LL,
+                        V212TargetKind::Watch,
+                        itemHash))
                 {
-                    const std::int64_t desired =
-                        (quantity >= V181_TARGET_MAX)
-                            ? quantity
-                            : V181_TARGET_MAX;
-
-                    if (!V212AddTarget(
-                            targets,
-                            quantityAddress,
-                            quantity,
-                            desired,
-                            V212TargetKind::Watch,
-                            itemHash))
-                    {
-                        return false;
-                    }
+                    return false;
                 }
             }
 
@@ -1746,6 +1771,7 @@ static bool V212PatchValidatedDescriptor(
     int cardsFound = 0;
     int watchesFound = 0;
     int ammoFoundCount = 0;
+    int ramHornHerbsFound = 0;
 
     for (bool value : cardFound)
         if (value) ++cardsFound;
@@ -1753,6 +1779,8 @@ static bool V212PatchValidatedDescriptor(
         if (value) ++watchesFound;
     for (bool value : ammoFound)
         if (value) ++ammoFoundCount;
+    for (bool value : ramHornHerbFound)
+        if (value) ++ramHornHerbsFound;
 
     g_v212ItemCount.store(
         static_cast<int>(view.itemCount),
@@ -1791,6 +1819,8 @@ static bool V212PatchValidatedDescriptor(
             static_cast<int>(V181_WATCH_VERIFY_ITEMS.size()) ||
         ammoFoundCount !=
             static_cast<int>(V181_AMMO_MAP_ITEMS.size()) ||
+        ramHornHerbsFound !=
+            static_cast<int>(V216_RAM_HORN_HERBS.size()) ||
         specificDuplicates != 0)
     {
         if (writeDetailedLog)
@@ -1876,14 +1906,14 @@ static bool V212PatchValidatedDescriptor(
             continue;
         }
 
-        if (target.kind == V212TargetKind::Ammo)
+        if (target.kind == V212TargetKind::RamHornHerb)
         {
-            if (current != V181_AMMO_TEST_MAX)
+            if (current < V181_TARGET_MAX)
                 ++verifyFailures;
         }
         else
         {
-            if (current < V181_TARGET_MAX)
+            if (current != -1LL)
                 ++verifyFailures;
         }
     }
@@ -3423,85 +3453,60 @@ static int V181CountSelectedItem(std::uint32_t itemHash)
         true);
 }
 
+static bool V216SetRamHornHerbUiState(bool satchelOpen)
+{
+    const std::int64_t desired = satchelOpen ? -1LL : V181_TARGET_MAX;
+
+    for (SIZE_T i = 0; i < V216_RAM_HORN_HERBS.size(); ++i)
+    {
+        const std::uintptr_t address =
+            g_v216RamHornBaseAddresses[i].load(std::memory_order_acquire);
+
+        if (address == 0)
+            return false;
+
+        std::int64_t current = 0;
+        if (!ReadI64Address(address, current))
+            return false;
+
+        if (current != desired)
+        {
+            if (!WriteI64Address(address, desired))
+                return false;
+        }
+
+        std::int64_t readBack = 0;
+        if (!ReadI64Address(address, readBack) || readBack != desired)
+            return false;
+    }
+
+    g_v216RamHornUiSentinelActive = satchelOpen;
+    return true;
+}
+
 static void V181UpdateSatchelHoardingUi()
 {
+    // v2.16: no text rewriting. Native -1 presentation handles every normal
+    // item. Mint/Thyme/Oregano use -1 only while the live Satchel selection
+    // exists, then immediately return to 500000 for gameplay harvesting.
     const int satchel = V181GetDataBindingPath(V181_SATCHEL_PATH);
     const int selected = V181GetDataBindingPath(V181_SELECTED_PATH);
+    const bool satchelOpen = (satchel != 0 && selected != 0);
 
-    if (satchel == 0 || selected == 0)
-    {
-        if (g_v181SatchelUiOpen)
-        {
-            WriteLog(
-                "[v1.81 UI] Satchel closed. interceptedWrites=" +
-                std::to_string(static_cast<long long>(g_v181TipWriteIntercepts)));
-        }
-
-        g_v181SatchelUiOpen = false;
-        g_v181SatchelOpenForHook.store(false, std::memory_order_release);
-        g_v181CachedTipHandle.store(0, std::memory_order_release);
-        g_v181LastUiItem = 0;
-        g_v181LastUiCount = -999999;
-        return;
-    }
-
-    if (!g_v181SatchelUiOpen)
-    {
-        WriteLog(
-            "[v1.81 UI] Satchel detected. Satchel=" + Hex(satchel) +
-            " Selected=" + Hex(selected));
-        g_v181SatchelUiOpen = true;
-        g_v181SatchelOpenForHook.store(true, std::memory_order_release);
-    }
-
-    const int nameHandle =
-        V181GetDataBindingPath(V181_SELECTED_NAME_PATH);
-    const int tipHandle =
-        V181GetDataBindingPath(V181_SELECTED_TIP_PATH);
-
-    if (nameHandle == 0 || tipHandle == 0)
-    {
-        if (!g_v181SatchelUiUnavailableLogged)
-        {
-            WriteLog(
-                "[v1.81 UI] Satchel is open but Selected.Name/Selected.Tip "
-                "is not ready yet; waiting.");
-            g_v181SatchelUiUnavailableLogged = true;
-        }
-        return;
-    }
-
-    g_v181SatchelUiUnavailableLogged = false;
-    g_v181SatchelOpenForHook.store(true, std::memory_order_release);
-    g_v181CachedTipHandle.store(tipHandle, std::memory_order_release);
-
-    const std::uint32_t selectedItem =
-        V181ReadDataBindingHash(nameHandle);
-    if (selectedItem == 0)
+    if (satchelOpen == g_v181SatchelUiOpen)
         return;
 
-    const int count = V181CountSelectedItem(selectedItem);
-    const bool changed =
-        selectedItem != g_v181LastUiItem || count != g_v181LastUiCount;
+    if (!V216SetRamHornHerbUiState(satchelOpen))
+        return;
 
-    // v1.81 is intentionally READ-ONLY here. Do not write Selected.Tip from
-    // the watcher. The no-gap native intercept decides from Rockstar's actual
-    // incoming text whether this is a normal stackable leaf. That means:
-    //   "Carrying X..." with X > 0 -> "Hoarding X"
-    //   "This is a unique item."    -> untouched
-    //   submenu/group/header Tips   -> untouched
-    //   zero-count pseudo rows      -> untouched
-    if (changed)
-    {
-        WriteLog(
-            "[v1.81 UI] selectedItem=" + Hex(selectedItem) +
-            " realCount=" + std::to_string(count) +
-            " watcher=READ_ONLY" +
-            " interceptedWrites=" +
-            std::to_string(static_cast<long long>(g_v181TipWriteIntercepts)));
-        g_v181LastUiItem = selectedItem;
-        g_v181LastUiCount = count;
-    }
+    g_v181SatchelUiOpen = satchelOpen;
+
+    WriteLog(
+        std::string("[v2.16 RAM-HORN UI] Satchel ") +
+        (satchelOpen ? "OPEN" : "CLOSED") +
+        (satchelOpen
+            ? ": Mint/Thyme/Oregano base capacities -> -1 for native Carrying X display."
+            : ": Mint/Thyme/Oregano base capacities -> 500000 for normal gameplay."));
 }
 
 static void MonitorNativeSide()
@@ -3828,18 +3833,18 @@ static void UOS_RunFirstEligibleWelcome()
 {
     if (UOS_WelcomeSeen())
     {
-        WriteLog("[v2.15.24 WELCOME] RETURNING RUN - Satchel Welcome already seen; skipped.");
+        WriteLog("[v2.16 WELCOME] RETURNING RUN - Satchel Welcome already seen; skipped.");
         return;
     }
 
     WriteLog(
-        "[v2.15.24 WELCOME] FIRST RUN - waiting for normal player control, "
+        "[v2.16 WELCOME] FIRST RUN - waiting for normal player control, "
         "then genuine gameplay movement. No Chapter/MUD1 gate. No Frontier coordination.");
 
     UOS_WaitForPlayerControlOnly();
 
     WriteLog(
-        "[v2.15.24 WELCOME] Player control detected; waiting for genuine movement input.");
+        "[v2.16 WELCOME] Player control detected; waiting for genuine movement input.");
 
     while (!UOS_GameplayMovementInputDetected())
     {
@@ -3847,12 +3852,12 @@ static void UOS_RunFirstEligibleWelcome()
     }
 
     WriteLog(
-        "[v2.15.24 WELCOME] Gameplay movement detected; beginning 4000 ms settling delay.");
+        "[v2.16 WELCOME] Gameplay movement detected; beginning 4000 ms settling delay.");
 
     WAIT(4000);
 
     WriteLog(
-        "[v2.15.24 WELCOME] 4000 ms settling delay complete; Welcome may now display.");
+        "[v2.16 WELCOME] 4000 ms settling delay complete; Welcome may now display.");
     constexpr const char* kDict = "hwc_uos_welcome";
     invoke<Void>(0xC1BA29DF5631B0F8ULL, kDict, false);
 
@@ -3864,16 +3869,16 @@ static void UOS_RunFirstEligibleWelcome()
 
         if ((GetTickCount() - loadStart) >= 10000)
         {
-            WriteLog("[v2.15.24 WELCOME] ERROR: hwc_uos_welcome texture dictionary did not load. Welcome state NOT saved.");
+            WriteLog("[v2.16 WELCOME] ERROR: hwc_uos_welcome texture dictionary did not load. Welcome state NOT saved.");
             return;
         }
     }
 
     const int continuePrompt = UOS_CreateContinuePrompt();
     if (continuePrompt == 0)
-        WriteLog("[v2.15.24 WELCOME] WARNING: native Continue prompt could not be registered.");
+        WriteLog("[v2.16 WELCOME] WARNING: native Continue prompt could not be registered.");
     else
-        WriteLog("[v2.15.24 WELCOME] Welcome displayed; waiting for native Continue/Accept input.");
+        WriteLog("[v2.16 WELCOME] Welcome displayed; waiting for native Continue/Accept input.");
 
     invoke<Void>(0xFAEC088D28B1DE4AULL, true); // SET_GAME_PAUSED
 
@@ -3910,9 +3915,9 @@ static void UOS_RunFirstEligibleWelcome()
     invoke<Void>(0xFAEC088D28B1DE4AULL, false); // SET_GAME_PAUSED
 
     if (UOS_SaveWelcomeSeen())
-        WriteLog("[v2.15.24 WELCOME] Welcome dismissed; binary UltimateOutlawSatchel.dat marker saved.");
+        WriteLog("[v2.16 WELCOME] Welcome dismissed; binary UltimateOutlawSatchel.dat marker saved.");
     else
-        WriteLog("[v2.15.24 WELCOME] ERROR: Welcome dismissed but binary state marker could not be saved; next launch will retry.");
+        WriteLog("[v2.16 WELCOME] ERROR: Welcome dismissed but binary state marker could not be saved; next launch will retry.");
 }
 
 
@@ -4000,7 +4005,7 @@ static void UOS_ArmSoloHarisPresentation()
     g_uosSoloStartupPending = true;
 
     WriteLog(
-        "[v2.15.24 STARTUP] Solo Haris presentation armed. "
+        "[v2.16 STARTUP] Solo Haris presentation armed. "
         "Frontier Stash per-frame texture pattern selected.");
 }
 
@@ -4022,7 +4027,7 @@ static void UOS_BeginSoloHarisPresentation()
     g_uosSoloFirstDrawReturnedLogged = false;
 
     WriteLog(
-        "[v2.15.24 STARTUP] Solo Haris presentation begun; "
+        "[v2.16 STARTUP] Solo Haris presentation begun; "
         "2000 ms pre-entry delay started.");
 }
 
@@ -4041,7 +4046,7 @@ static void UOS_DrawSoloHarisFrontierExact(float centerY)
     {
         g_uosSoloPostRequestHasPreLogged = true;
         WriteLog(
-            "[v2.15.24 STARTUP] PROBE: next frame reached; about to call "
+            "[v2.16 STARTUP] PROBE: next frame reached; about to call "
             "HAS_STREAMED_TEXTURE_DICT_LOADED after the successful request.");
     }
 
@@ -4054,7 +4059,7 @@ static void UOS_DrawSoloHarisFrontierExact(float centerY)
         g_uosSoloPostRequestHasReturnLogged = true;
         WriteLog(
             std::string(
-                "[v2.15.24 STARTUP] PROBE: post-request HAS call returned ") +
+                "[v2.16 STARTUP] PROBE: post-request HAS call returned ") +
             (uosHarisLoaded ? "TRUE." : "FALSE."));
     }
 
@@ -4066,7 +4071,7 @@ static void UOS_DrawSoloHarisFrontierExact(float centerY)
         {
             g_uosSoloFirstRequestLogged = true;
             WriteLog(
-                "[v2.15.24 STARTUP] First per-frame Haris dictionary request: "
+                "[v2.16 STARTUP] First per-frame Haris dictionary request: "
                 "hwc_haris_solo_startup");
         }
 
@@ -4079,7 +4084,7 @@ static void UOS_DrawSoloHarisFrontierExact(float centerY)
         {
             g_uosSoloFirstRequestReturnedLogged = true;
             WriteLog(
-                "[v2.15.24 STARTUP] First Haris dictionary request returned; "
+                "[v2.16 STARTUP] First Haris dictionary request returned; "
                 "draw function exits immediately for this frame.");
         }
 
@@ -4090,7 +4095,7 @@ static void UOS_DrawSoloHarisFrontierExact(float centerY)
     {
         g_uosSoloLoadedLogged = true;
         WriteLog(
-            "[v2.15.24 STARTUP] Haris dictionary reports LOADED; "
+            "[v2.16 STARTUP] Haris dictionary reports LOADED; "
             "DRAW_SPRITE path is now eligible.");
     }
 
@@ -4111,7 +4116,7 @@ static void UOS_DrawSoloHarisFrontierExact(float centerY)
     {
         g_uosSoloFirstDrawAttemptLogged = true;
         WriteLog(
-            "[v2.15.24 STARTUP] About to make first Haris DRAW_SPRITE call.");
+            "[v2.16 STARTUP] About to make first Haris DRAW_SPRITE call.");
     }
 
     invoke<Void>(
@@ -4130,7 +4135,7 @@ static void UOS_DrawSoloHarisFrontierExact(float centerY)
     {
         g_uosSoloFirstDrawReturnedLogged = true;
         WriteLog(
-            "[v2.15.24 STARTUP] First Haris DRAW_SPRITE returned successfully.");
+            "[v2.16 STARTUP] First Haris DRAW_SPRITE returned successfully.");
     }
 }
 
@@ -4308,7 +4313,7 @@ static void UOS_UpdateSoloHarisPresentation()
         g_uosSoloStartupBegin = GetTickCount();
 
         WriteLog(
-            "[v2.15.24 STARTUP] 2000 ms pre-entry delay complete; "
+            "[v2.16 STARTUP] 2000 ms pre-entry delay complete; "
             "solo Haris animation window begun.");
     }
 
@@ -4403,7 +4408,7 @@ static void UOS_UpdateSoloHarisPresentation()
     g_uosSoloStartupRunning = false;
 
     WriteLog(
-        "[v2.15.24 STARTUP] Solo Haris + success-message presentation complete.");
+        "[v2.16 STARTUP] Solo Haris + success-message presentation complete.");
 }
 
 
@@ -4443,7 +4448,7 @@ static void UOS_ArmFrontierStartupLogSync()
     if (g_uosFrontierStartupLogPath.empty())
     {
         WriteLog(
-            "[v2.15.24 STARTUP] Frontier log sync unavailable: "
+            "[v2.16 STARTUP] Frontier log sync unavailable: "
             "could not resolve Frontier log path.");
         return;
     }
@@ -4462,7 +4467,7 @@ static void UOS_ArmFrontierStartupLogSync()
     g_uosFrontierStartupLogSyncArmed = true;
 
     WriteLog(
-        "[v2.15.24 STARTUP] Frontier log sync armed at current EOF; "
+        "[v2.16 STARTUP] Frontier log sync armed at current EOF; "
         "waiting for Frontier's exact presentation-begin marker.");
 }
 
@@ -4547,7 +4552,7 @@ static void UOS_BeginPairedHarisPresentation()
     UOS_ArmFrontierStartupLogSync();
 
     WriteLog(
-        "[v2.15.24 STARTUP] Frontier Stash detected. "
+        "[v2.16 STARTUP] Frontier Stash detected. "
         "Pointing Haris path armed with proven known-good hwc_haris_dusty resource.");
 }
 
@@ -4581,7 +4586,7 @@ static void UOS_DrawPairedHarisOriginalStartup(float centerY)
     {
         g_uosPairedFirstDrawLogged = true;
         WriteLog(
-            "[v2.15.24 STARTUP] First pointing-Haris DRAW_SPRITE returned successfully.");
+            "[v2.16 STARTUP] First pointing-Haris DRAW_SPRITE returned successfully.");
     }
 }
 
@@ -4601,7 +4606,7 @@ static void UOS_UpdatePairedHarisPresentation()
         {
             g_uosPairedFirstRequestLogged = true;
             WriteLog(
-                "[v2.15.24 STARTUP] First pointing-Haris dictionary request: "
+                "[v2.16 STARTUP] First pointing-Haris dictionary request: "
                 "hwc_haris_dusty");
         }
 
@@ -4614,7 +4619,7 @@ static void UOS_UpdatePairedHarisPresentation()
         {
             g_uosPairedFirstRequestReturnedLogged = true;
             WriteLog(
-                "[v2.15.24 STARTUP] First pointing-Haris dictionary request returned.");
+                "[v2.16 STARTUP] First pointing-Haris dictionary request returned.");
         }
 
         return;
@@ -4624,7 +4629,7 @@ static void UOS_UpdatePairedHarisPresentation()
     {
         g_uosPairedDictLoadedLogged = true;
         WriteLog(
-            "[v2.15.24 STARTUP] Pointing Haris dictionary reports LOADED. "
+            "[v2.16 STARTUP] Pointing Haris dictionary reports LOADED. "
             "Waiting read-only for Frontier's rgp_dusty_startup live signal.");
     }
 
@@ -4639,7 +4644,7 @@ static void UOS_UpdatePairedHarisPresentation()
             g_uosPairedAnimationBegin = GetTickCount();
 
             WriteLog(
-                "[v2.15.24 STARTUP] Frontier presentation-begin log marker detected; "
+                "[v2.16 STARTUP] Frontier presentation-begin log marker detected; "
                 "paired Haris/message clock synchronized to Frontier's real startup.");
         }
         else
@@ -4649,7 +4654,7 @@ static void UOS_UpdatePairedHarisPresentation()
             if ((GetTickCount() - g_uosPairedWaitBegin) >= 8000u)
             {
                 WriteLog(
-                    "[v2.15.24 STARTUP] Frontier presentation-begin log marker "
+                    "[v2.16 STARTUP] Frontier presentation-begin log marker "
                     "not seen within 8 seconds; falling back to proven solo Haris.");
 
                 g_uosPairedStartupRunning = false;
@@ -4744,7 +4749,7 @@ static void UOS_UpdatePairedHarisPresentation()
     g_uosPairedStartupRunning = false;
 
     WriteLog(
-        "[v2.15.24 STARTUP] Pointing Haris + paired Satchel message presentation complete.");
+        "[v2.16 STARTUP] Pointing Haris + paired Satchel message presentation complete.");
 }
 
 
@@ -4756,26 +4761,24 @@ void ScriptMain()
     ResetLog();
 
     WriteLog("============================================================");
-    WriteLog("[v2.15.24] HWC Ultimate Outlaw Satchel - SOLO + DUO STARTUP MESSAGES");
-    WriteLog("[v2.15.24 STARTUP] Frontier absent -> solo Haris then Halfwit Chipmunk's success message; Frontier present -> paired Haris then HWC's Satchel block synchronized with Dusty's existing message.");
-    WriteLog("[v2.15.24 WELCOME] First-run Welcome waits for player control + genuine movement, then 4000 ms.");
+    WriteLog("[v2.16] HWC Ultimate Outlaw Satchel - NATIVE -1 UNLIMITED CAPACITY");
+    WriteLog("[v2.16 STARTUP] Frontier absent -> solo Haris; Frontier present -> paired Haris/Dusty path retained.");
+    WriteLog("[v2.16 WELCOME] First-run Welcome waits for player control + genuine movement, then 4000 ms.");
     WriteLog("[v2.12] NO F7. No catalog profile. Captures Rockstar\'s live item-table descriptor and patches resolved multiplicities.");
-    WriteLog("[v2.12] General target: every positive live SLOTID_SATCHEL multiplicity -> at least 500000; zero/negative SATCHEL values untouched.");
-    WriteLog("[v2.12] Cigarette cards: exact 144 card item identities on SLOTID_NONE/ZERO -> at least 500000.");
-    WriteLog("[v2.12] Stackable watches: exact 4 known loot-watch identities on SLOTID_WATCH -> at least 500000; personal watch untouched.");
+    WriteLog("[v2.16] General target: every positive ordinary live SLOTID_SATCHEL multiplicity -> -1; zero/negative special records untouched.");
+    WriteLog("[v2.16] Cigarette cards: exact 144 card item identities on SLOTID_NONE/ZERO -> -1.");
+    WriteLog("[v2.16] Stackable watches: exact 4 known loot-watch identities on SLOTID_WATCH -> -1; personal/unique watch untouched.");
     WriteLog("[v2.12] Ammo target: all 43 mapped AMMO item identities, base SLOTID_NONE/ZERO record -> -1 regardless of catalog starting value.");
     WriteLog("[v2.12] Separate ammo upgrade/contribution records remain untouched.");
-    WriteLog("[v2.12] Satchel UI retained: ordinary positive-quantity leaf items -> Hoarding <Rockstar current quantity>.");
+    WriteLog("[v2.16] Satchel UI: Rockstar native Carrying X via -1; Mint/Thyme/Oregano temporarily swap 500000 -> -1 only while Satchel is open.");
     WriteLog("[v2.12] Weapon wheel retained: Rockstar current-ammo display; -1 suppresses slash/max.");
     WriteLog("[v2.12] No custom ammo text overlay.");
     WriteLog("[v2.12] No replacement catalog, no per-mod catalog profile, no process-wide ItemDatabase scan.");
     WriteLog("[v2.12] Log: UltimateOutlawSatchel\\UltimateOutlawSatchel.log");
     WriteLog("============================================================");
 
-    const bool immediateTipHook = V181InstallImmediateTipWriteHook();
-    WriteLog(
-        std::string("[v1.81 UI HOOK] startup result=") +
-        (immediateTipHook ? "ARMED" : "NOT-ARMED"));
+    // v2.16: no DATABINDING_WRITE_DATA_STRING entry hook.
+    WriteLog("[v2.16 UI] DataBinding write hook DISABLED; native -1 presentation only.");
 
     const ULONGLONG workerTick =
         g_v181WorkerTick.load(std::memory_order_relaxed);
@@ -4819,7 +4822,7 @@ void ScriptMain()
     if (patchTick != 0)
     {
         WriteLog(
-            "[v1.81 TIMING] general 517-record 500000 pass first verified " +
+            "[v2.16 TIMING] universal capacity pass first verified " +
             std::to_string(patchTick - g_v181DllAttachTick) +
             " ms after DLL attach (" +
             std::to_string(
@@ -4941,8 +4944,8 @@ void ScriptMain()
         g_v212AmmoFound.load(std::memory_order_relaxed) == 43 &&
         g_v212DirectVerifyFailures.load(std::memory_order_relaxed) == 0 &&
         initialMax >= V181_TARGET_MAX &&
-        cardSampleMax >= V181_TARGET_MAX &&
-        platinumWatchMax >= V181_TARGET_MAX &&
+        cardSampleMax == -1 &&
+        platinumWatchMax == -1 &&
         personalWatchMax == 1 &&
         ammoNativePasses == static_cast<int>(V181_AMMO_MAP_ITEMS.size());
 
@@ -4951,7 +4954,7 @@ void ScriptMain()
         std::memory_order_release);
 
     WriteLog(
-        std::string("[v2.12 UNIVERSAL NATIVE VERIFY] result=") +
+        std::string("[v2.16 UNIVERSAL NATIVE VERIFY] result=") +
         (v212NativeSuccess ? "SUCCESS" : "FAILED") +
         " Mint=" + std::to_string(initialMax) +
         " cardSample=" + std::to_string(cardSampleMax) +
@@ -4963,10 +4966,11 @@ void ScriptMain()
     {
         g_v181GeneralSuccessLogged = true;
         WriteLog(
-            "[v2.12 UNIVERSAL SUCCESS] Rockstar's live item table was resolved directly; "
-            "all positive SATCHEL capacities are >=500000, all 144 cigarette cards and "
-            "4 stackable watches are >=500000, and all 43 ammo base capacities are -1. "
-            "The catalog's original numeric capacities were never trusted.");
+            "[v2.16 UNIVERSAL SUCCESS] Rockstar's live item table was resolved directly; "
+            "ordinary positive SATCHEL capacities are -1, all 144 cigarette cards, "
+            "4 stackable watches, and all 43 ammo base capacities are -1. "
+            "Wild Mint/Creeping Thyme/Oregano stay at 500000 during gameplay; "
+            "personal/unique records remain untouched.");
 
         // v2.14.5: release cleanup - no on-screen v2.12 catalog-bypass notice.
     }
@@ -4996,9 +5000,11 @@ void ScriptMain()
     else
     {
         SetScreenMessage(
-            "500K CAPACITY PATCH - CHECK LOG",
+            "UOS v2.16 CAPACITY PATCH - CHECK LOG",
             12000u);
     }
+
+    V216SetRamHornHerbUiState(false);
 
     g_v181NextWatchTick = GetTickCount64();
     g_v181LastUiTick = GetTickCount64();
@@ -5019,12 +5025,12 @@ void ScriptMain()
     if (uosWasReturningRun)
     {
         WriteLog(
-            "[v2.15.24 STARTUP] RETURNING RUN - waiting only for normal player control.");
+            "[v2.16 STARTUP] RETURNING RUN - waiting only for normal player control.");
 
         UOS_WaitForPlayerControlOnly();
 
         WriteLog(
-            "[v2.15.24 STARTUP] Player control detected; checking Frontier Stash module.");
+            "[v2.16 STARTUP] Player control detected; checking Frontier Stash module.");
 
         HMODULE frontierModule =
             GetModuleHandleW(L"UltimateFrontierStash.asi");
@@ -5032,7 +5038,7 @@ void ScriptMain()
         if (frontierModule == nullptr)
         {
             WriteLog(
-                "[v2.15.24 STARTUP] UltimateFrontierStash.asi NOT loaded; "
+                "[v2.16 STARTUP] UltimateFrontierStash.asi NOT loaded; "
                 "using proven solo Haris path unchanged.");
 
             UOS_ArmSoloHarisPresentation();
@@ -5041,7 +5047,7 @@ void ScriptMain()
         else
         {
             WriteLog(
-                "[v2.15.24 STARTUP] UltimateFrontierStash.asi loaded; "
+                "[v2.16 STARTUP] UltimateFrontierStash.asi loaded; "
                 "using pointing Haris + Dusty synchronization path.");
 
             UOS_BeginPairedHarisPresentation();
