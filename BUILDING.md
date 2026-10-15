@@ -1,6 +1,6 @@
 # Building Ultimate Outlaw Satchel
 
-These instructions describe the Visual Studio configuration used to build the current **v2.15.24** release source.
+These instructions describe the Visual Studio configuration used to build the current **V2** release source.
 
 ## Requirements
 
@@ -132,6 +132,8 @@ Those YTDs provide artwork only and are not part of the C++ compilation process.
 
 ## Notes for reviewers
 
-The release source intentionally contains low-level Windows memory APIs and vectored exception handling. Those mechanisms are used to intercept Rockstar runtime/native data and adjust item-capacity/UI behavior inside the RDR2 process.
+The release source contains low-level Windows memory APIs because the mod resolves and patches Rockstar's runtime item-capacity data inside the Red Dead Redemption 2 process.
 
-The source does not include networking, downloading, persistence outside its own small mod data/log files, credential access, browser access, or unrelated system modification.
+Some legacy helper code for earlier development experiments remains in the source, including vectored-exception and native-interception support. The current V2 release does **not** install the old `DATABINDING_WRITE_DATA_STRING` breakpoint/write hook.
+
+The source does not include networking, downloading, credential access, browser access, or unrelated system modification. Its only persistence is its own small mod data/log files.
