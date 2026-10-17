@@ -7,7 +7,7 @@ This repository is provided so Nexus Mods staff and other reviewers can inspect 
 ## Current source
 
 - Release source: `main.cpp`
-- Release version: **V2**
+- Release version: **v2.1 — Bug Fixes**
 - Output binary name: `UltimateOutlawSatchel.asi`
 - Target game: Red Dead Redemption 2 Story Mode
 - Platform: Windows x64
@@ -22,7 +22,7 @@ The current release includes:
 - near-bottomless ammunition capacity
 - expanded cigarette-card and stackable pocket-watch capacities
 - Rockstar's native `Carrying <quantity>` satchel display
-- special runtime handling for Wild Mint, Creeping Thyme, and Oregano so the Ram Horn Trinket reward remains correct
+- special runtime handling for all Story Mode harvestable plants so Herbalist's Ram Horn Trinket conditions and pickup quantities remain correct
 - a first-run welcome screen
 - Haris startup presentation
 - optional presentation synchronization when Ultimate Frontier Stash is loaded
@@ -31,9 +31,9 @@ The mod does not replace Rockstar's `catalog_sp.ymt`.
 
 ## Runtime implementation
 
-V2 resolves and patches Rockstar's live item-capacity records inside the Red Dead Redemption 2 process.
+v2.1 resolves and patches Rockstar's live item-capacity records inside the Red Dead Redemption 2 process.
 
-The current release **does not install the old `DATABINDING_WRITE_DATA_STRING` breakpoint/write hook** that earlier development builds used for the custom `Hoarding <quantity>` wording. V2 leaves Rockstar's native `Carrying <quantity>` presentation in place.
+The current release **does not install the old `DATABINDING_WRITE_DATA_STRING` breakpoint/write hook** that earlier development builds used for the custom `Hoarding <quantity>` wording. v2.1 leaves Rockstar's native `Carrying <quantity>` presentation in place.
 
 The source still contains some legacy helper code from earlier development iterations, but that DataBinding write-hook path is not activated by the current release.
 
